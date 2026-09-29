@@ -1,1 +1,14 @@
 Szoftverarchitektúrák házi repo
+
+Backend:
+ - Python, ChromaDB, Flask API
+ - Endpoint: add (text, PDF, image), remove, query
+ - Query: Text Embedding Sentence Transformer model, fuzzy matching reranker
+ - Add: PDF -> image, image -OCR-> text. Document chunking w/ sliding window
+ - Language?  (HU/EN)
+ - LLM? (Bonsai 8B? ollama?)
+
+Frontend:
+ - React, Typescript
+
+ 3. réteg kell?
