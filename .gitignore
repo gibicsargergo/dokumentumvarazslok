@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# HuggingFace / model caches
+models/
+
+# generated app data (keep the folders, ignore their contents)
+backend/storage/*
+!backend/storage/.gitkeep
+backend/chroma_data/*
+!backend/chroma_data/.gitkeep
