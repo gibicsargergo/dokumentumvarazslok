@@ -1,0 +1,22 @@
+@import "tailwindcss";
+
+/*
+ * Design tokens.
+ * These are the app's core colours. Change a value here and every component
+ * that references the token updates automatically — no hunting through JSX.
+ */
+@theme {
+  /* Surfaces */
+  --color-surface: #ffffff; /* raised / active surfaces        (was bg-white)       */
+  --color-track: #f3f4f6;   /* segmented-control track         (was bg-gray-100)    */
+
+  /* Text */
+  --color-ink: #111827;     /* primary text                    (was text-gray-900)  */
+  --color-body: #1f2937;    /* result / body text              (was text-gray-800)  */
+  --color-muted: #9ca3af;   /* placeholders & empty states     (was text-gray-400)  */
+  --color-subtle: #6b7280;  /* secondary labels                (was text-gray-500)  */
+  --color-emphasis: #374151;/* hovered secondary               (was text-gray-700)  */
+
+  /* Lines */
+  --color-line: #d1d5db;    /* borders                         (was border-gray-300)*/
+}
