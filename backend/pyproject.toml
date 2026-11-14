@@ -1,0 +1,5 @@
+[project]
+name = "dokumentumvarazslok-backend"
+version = "0.1.0"
+description = "Document knowledge-base backend core (ChromaDB + reranker)"
+requires-python = ">=3.10"
