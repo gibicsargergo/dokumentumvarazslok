@@ -6,6 +6,7 @@ from pathlib import Path
 # Make sure `rag` imports resolve no matter where we're launched from.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from filestore import FileStore
 from rag import KnowledgeBase
 from rag.document_file import SUPPORTED_EXTS
 
@@ -14,7 +15,7 @@ def _hr(char: str = "-", width: int = 60) -> None:
     print(char * width)
 
 
-def cmd_add(kb: KnowledgeBase) -> None:
+def cmd_add(kb: KnowledgeBase, files: FileStore) -> None:
     path = input("Path to a file or folder: ").strip()
     p = Path(path).expanduser()
     if not p.exists():
@@ -38,50 +39,86 @@ def cmd_add(kb: KnowledgeBase) -> None:
     category = input("Category (optional): ").strip() or None
     tags_raw = input("Tags, comma separated (optional): ").strip()
     tags = [t.strip() for t in tags_raw.split(",") if t.strip()] or None
+    uploader = input("Uploader (optional): ").strip()
 
     for target in targets:
-        try:
-            result = kb.add(target, title=title, category=category, tags=tags)
-            print(
-                f"  + added {target.name}: id={result['id'][:8]} chunks={result['chunks']}"
-            )
-        except Exception as exc:
-            print(f"  x failed {target.name}: {exc}")
+        _upload_one(kb, files, target, title, category, tags, uploader)
 
 
-def cmd_list(kb: KnowledgeBase) -> None:
-    docs = kb.list_documents()
-    if not docs:
+def _upload_one(
+    kb: KnowledgeBase,
+    files: FileStore,
+    target: Path,
+    title: str | None,
+    category: str | None,
+    tags: list[str] | None,
+    uploader: str,
+) -> None:
+    # 1) upload: store the original file with its metadata
+    try:
+        stored = files.save(
+            target,
+            uploader=uploader,
+            name=title,
+            category=category or "",
+            labels=tags or [],
+        )
+    except Exception as exc:
+        print(f"  x failed to store {target.name}: {exc}")
+        return
+
+    # 2) attempt text extraction + indexing; the stored file is kept either way
+    try:
+        result = kb.add(
+            stored.path,
+            title=stored.name,
+            category=stored.category,
+            tags=list(stored.labels),
+        )
+    except Exception as exc:
+        print(f"  ~ stored {target.name} (id={stored.id[:8]}) but indexing failed: {exc}")
+        return
+    if result["chunks"]:
+        files.update(stored.id, index_id=result["id"])
+    print(f"  + added {target.name}: id={stored.id[:8]} chunks={result['chunks']}")
+
+
+def cmd_list(kb: KnowledgeBase, files: FileStore) -> None:
+    stored = files.list_files()
+    if not stored:
         print("  (no documents stored yet)")
         return
-    for i, d in enumerate(docs, 1):
-        print(f"[{i}] {d['id'][:8]}  {d['title']}   (chunks={d['chunks']})")
-        bits = []
-        if d["category"]:
-            bits.append(f"cat={d['category']}")
-        if d["tags"]:
-            bits.append("tags=" + ",".join(d["tags"]))
-        if bits:
-            print("      " + "  ".join(bits))
-        if d["source"]:
-            print(f"      src={d['source']}")
+    chunks = {d["id"]: d["chunks"] for d in kb.list_documents()}
+    for i, f in enumerate(stored, 1):
+        n = chunks.get(f.index_id, 0) if f.index_id else 0
+        print(f"[{i}] {f.id[:8]}  {f.name}   (chunks={n})")
+        bits = [f"uploaded={f.uploaded_at:%Y-%m-%d %H:%M}"]
+        if f.uploader:
+            bits.append(f"by={f.uploader}")
+        if f.category:
+            bits.append(f"cat={f.category}")
+        if f.labels:
+            bits.append("labels=" + ",".join(f.labels))
+        print("      " + "  ".join(bits))
+        print(f"      file={f.path}")
 
 
-def cmd_delete(kb: KnowledgeBase) -> None:
-    docs = kb.list_documents()
-    if not docs:
+def cmd_delete(kb: KnowledgeBase, files: FileStore) -> None:
+    stored = files.list_files()
+    if not stored:
         print("  (nothing to delete)")
         return
     print("Stored documents:")
-    for i, d in enumerate(docs, 1):
-        print(f"  [{i}] {d['id']}  {d['title']} (chunks={d['chunks']})")
+    for i, f in enumerate(stored, 1):
+        print(f"  [{i}] {f.id}  {f.name}")
     choice = input("Delete which number? ").strip()
-    if not choice.isdigit() or not (1 <= int(choice) <= len(docs)):
+    if not choice.isdigit() or not (1 <= int(choice) <= len(stored)):
         print("  ! invalid selection")
         return
-    doc = docs[int(choice) - 1]
-    removed = kb.delete(doc["id"])
-    print(f"  - deleted {doc['title']} ({removed} chunks removed)")
+    f = stored[int(choice) - 1]
+    removed = kb.delete(f.index_id) if f.index_id else 0
+    files.delete(f.id)
+    print(f"  - deleted {f.name} ({removed} chunks removed)")
 
 
 def cmd_search(kb: KnowledgeBase) -> None:
@@ -110,6 +147,7 @@ def main() -> None:
     print("Knowledge Base CLI")
     _hr()
     kb = KnowledgeBase()
+    files = FileStore()
     while True:
         print("\nWhat would you like to do?")
         print("  [1] Add documents")
@@ -120,11 +158,11 @@ def main() -> None:
         choice = input("> ").strip()
         try:
             if choice == "1":
-                cmd_add(kb)
+                cmd_add(kb, files)
             elif choice == "2":
-                cmd_list(kb)
+                cmd_list(kb, files)
             elif choice == "3":
-                cmd_delete(kb)
+                cmd_delete(kb, files)
             elif choice == "4":
                 cmd_search(kb)
             elif choice == "5":
