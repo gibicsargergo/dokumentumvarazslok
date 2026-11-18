@@ -6,9 +6,12 @@ from pathlib import Path
 # Make sure `rag` imports resolve no matter where we're launched from.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from filestore import FileStore
+from filestore import Actor, FileStore
 from rag import KnowledgeBase
 from rag.document_file import SUPPORTED_EXTS
+
+# The CLI is a local maintenance tool, so it runs with admin rights.
+CLI_ACTOR = Actor(user_id="cli", role="admin")
 
 
 def _hr(char: str = "-", width: int = 60) -> None:
@@ -39,10 +42,11 @@ def cmd_add(kb: KnowledgeBase, files: FileStore) -> None:
     category = input("Category (optional): ").strip() or None
     tags_raw = input("Tags, comma separated (optional): ").strip()
     tags = [t.strip() for t in tags_raw.split(",") if t.strip()] or None
-    uploader = input("Uploader (optional): ").strip()
+    uploader_id = input(f"Uploader id [{CLI_ACTOR.user_id}]: ").strip() or CLI_ACTOR.user_id
+    is_private = input("Private? [y/N]: ").strip().lower() in ("y", "yes")
 
     for target in targets:
-        _upload_one(kb, files, target, title, category, tags, uploader)
+        _upload_one(kb, files, target, title, category, tags, uploader_id, is_private)
 
 
 def _upload_one(
@@ -52,16 +56,18 @@ def _upload_one(
     title: str | None,
     category: str | None,
     tags: list[str] | None,
-    uploader: str,
+    uploader_id: str,
+    is_private: bool,
 ) -> None:
     # 1) upload: store the original file with its metadata
     try:
         stored = files.save(
             target,
-            uploader=uploader,
+            uploader_id=uploader_id,
             name=title,
             category=category or "",
             labels=tags or [],
+            is_private=is_private,
         )
     except Exception as exc:
         print(f"  x failed to store {target.name}: {exc}")
@@ -74,17 +80,19 @@ def _upload_one(
             title=stored.name,
             category=stored.category,
             tags=list(stored.labels),
+            uploader_id=stored.uploader_id,
+            is_private=stored.is_private,
         )
     except Exception as exc:
         print(f"  ~ stored {target.name} (id={stored.id[:8]}) but indexing failed: {exc}")
         return
     if result["chunks"]:
-        files.update(stored.id, index_id=result["id"])
+        files.set_index_id(stored.id, result["id"])
     print(f"  + added {target.name}: id={stored.id[:8]} chunks={result['chunks']}")
 
 
 def cmd_list(kb: KnowledgeBase, files: FileStore) -> None:
-    stored = files.list_files()
+    stored = files.list_files(viewer=CLI_ACTOR)
     if not stored:
         print("  (no documents stored yet)")
         return
@@ -92,9 +100,11 @@ def cmd_list(kb: KnowledgeBase, files: FileStore) -> None:
     for i, f in enumerate(stored, 1):
         n = chunks.get(f.index_id, 0) if f.index_id else 0
         print(f"[{i}] {f.id[:8]}  {f.name}   (chunks={n})")
-        bits = [f"uploaded={f.uploaded_at:%Y-%m-%d %H:%M}"]
-        if f.uploader:
-            bits.append(f"by={f.uploader}")
+        bits = [
+            f"uploaded={f.uploaded_at:%Y-%m-%d %H:%M}",
+            f"by={f.uploader_id}",
+            "private" if f.is_private else "public",
+        ]
         if f.category:
             bits.append(f"cat={f.category}")
         if f.labels:
@@ -104,7 +114,7 @@ def cmd_list(kb: KnowledgeBase, files: FileStore) -> None:
 
 
 def cmd_delete(kb: KnowledgeBase, files: FileStore) -> None:
-    stored = files.list_files()
+    stored = files.list_files(viewer=CLI_ACTOR)
     if not stored:
         print("  (nothing to delete)")
         return
@@ -117,7 +127,7 @@ def cmd_delete(kb: KnowledgeBase, files: FileStore) -> None:
         return
     f = stored[int(choice) - 1]
     removed = kb.delete(f.index_id) if f.index_id else 0
-    files.delete(f.id)
+    files.delete(f.id, actor=CLI_ACTOR)
     print(f"  - deleted {f.name} ({removed} chunks removed)")
 
 
@@ -126,7 +136,7 @@ def cmd_search(kb: KnowledgeBase) -> None:
     if not query:
         print("  (empty query)")
         return
-    results = kb.search(query)
+    results = kb.search(query, viewer_id=CLI_ACTOR.user_id, see_all=CLI_ACTOR.is_admin)
     if not results:
         print("  ~ no results above the relevance threshold.")
         return
