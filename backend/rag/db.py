@@ -114,6 +114,35 @@ class KnowledgeBase:
             )
         return len(ids)
 
+    def update_metadata(
+        self,
+        doc_id: str,
+        *,
+        title: str | None = None,
+        category: str | None = None,
+        tags: list[str] | None = None,
+    ) -> int:
+        """Mirror metadata edits onto every chunk of *doc_id*; returns the chunk count.
+
+        ``None`` leaves a field unchanged, so callers send only what changed.
+        Only the per-chunk metadata copy is rewritten -- text and vectors stay.
+        """
+        partial: chromadb.Metadata = {}
+        if title is not None:
+            partial["title"] = title
+        if category is not None:
+            partial["category"] = category
+        if tags is not None:
+            partial["tags"] = ",".join(tags)
+        if not partial:
+            return 0
+
+        ids = self.collection.get(where={"doc_id": doc_id}).get("ids", [])
+        if not ids:
+            return 0
+        self.collection.update(ids=ids, metadatas=[dict(partial) for _ in ids])
+        return len(ids)
+
     # -- read ------------------------------------------------------------
     def delete(self, doc_id: str) -> int:
         """Remove every chunk belonging to *doc_id* plus its stored file."""
