@@ -2,7 +2,7 @@ import sqlite3
 from filestore.config import STORAGE_DIR, DB_NAME
 import uuid
 from datetime import datetime
-from .models import User, Session
+from .models import User, Session, Role
 
 DB_PATH = STORAGE_DIR / DB_NAME
 
@@ -70,12 +70,7 @@ class AuthStore:
         if row is None:
             return None
 
-        return User(
-            id=row["id"],
-            email=row["email"],
-            password_hash=row["password_hash"],
-            role=row["role"],
-        )
+        return User(**row)
 
     def get_user_by_id(self, user_id: str) -> User | None:
         with sqlite3.connect(DB_PATH) as conn:
@@ -88,12 +83,7 @@ class AuthStore:
         if row is None:
             return None
 
-        return User(
-            id=row["id"],
-            email=row["email"],
-            password_hash=row["password_hash"],
-            role=row["role"],
-        )
+        return User(**row)
     
     def create_session(
         self,
@@ -142,4 +132,17 @@ class AuthStore:
                 "DELETE FROM sessions WHERE token_hash = ?",
                 (token_hash,),
             )
+
+    def set_user_role(self, user_id: str, role: Role) -> bool:
+        if role not in ("user", "admin"):
+            raise ValueError("Invalid role")
+
+        with sqlite3.connect(DB_PATH) as conn:
+            cursor = conn.execute(
+                "UPDATE users SET role = ? WHERE id = ?",
+                (role, user_id),
+            )
+
+        return cursor.rowcount > 0
+
 

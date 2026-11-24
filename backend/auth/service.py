@@ -1,4 +1,5 @@
 
+import re
 import sqlite3
 
 from .models import User
@@ -10,8 +11,10 @@ from .security import (
     generate_session_token,
     hash_session_token,
 )
+from filestore.permissions import Actor
 
 SESSION_DURATION = timedelta(days=1)
+EMAIL_REGEX = r"^[\w\-\.]+@([\w-]+\.)+[\w-]{2,}$"
 
 class EmailAlreadyExistsError(ValueError):
     pass
@@ -26,7 +29,7 @@ class AuthService:
     def register(self, email: str, password: str) -> User:
         email = email.strip().lower()
 
-        if not email or "@" not in email:
+        if not email or not re.match(EMAIL_REGEX, email):
             raise ValueError("Invalid email address")
 
         if len(password) < 8:
@@ -53,12 +56,7 @@ class AuthService:
 
         user = self.store.get_user_by_email(email)
 
-        if user is None:
-            raise InvalidCredentialsError(
-                "Invalid email or password"
-            )
-
-        if not verify_password(password, user.password_hash):
+        if user is None or not verify_password(password, user.password_hash):
             raise InvalidCredentialsError(
                 "Invalid email or password"
             )
@@ -95,6 +93,18 @@ class AuthService:
     def logout(self, token: str) -> None:
         token_hash = hash_session_token(token)
         self.store.delete_session(token_hash)
+
+    def get_current_actor(self, token: str) -> Actor | None:
+        user = self.get_current_user(token)
+
+        if user is None:
+            return None
+
+        return Actor(
+            user_id=user.id,
+            role=user.role,
+        )
+
 
 
 
