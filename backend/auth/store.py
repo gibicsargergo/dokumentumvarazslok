@@ -1,7 +1,8 @@
 import sqlite3
 from filestore.config import STORAGE_DIR, DB_NAME
 import uuid
-from .models import User
+from datetime import datetime
+from .models import User, Session
 
 DB_PATH = STORAGE_DIR / DB_NAME
 
@@ -93,3 +94,52 @@ class AuthStore:
             password_hash=row["password_hash"],
             role=row["role"],
         )
+    
+    def create_session(
+        self,
+        token_hash: str,
+        user_id: str,
+        expires_at: datetime,
+    ) -> Session:
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute("PRAGMA foreign_keys = ON")
+            conn.execute(
+                """
+                INSERT INTO sessions (
+                    token_hash, user_id, expires_at
+                )
+                VALUES (?, ?, ?)
+                """,
+                (token_hash, user_id, expires_at.isoformat()),
+            )
+
+        return Session(
+            token_hash=token_hash,
+            user_id=user_id,
+            expires_at=expires_at,
+        )
+
+    def get_session(self, token_hash: str) -> Session | None:
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT * FROM sessions WHERE token_hash = ?",
+                (token_hash,),
+            ).fetchone()
+
+        if row is None:
+            return None
+
+        return Session(
+            token_hash=row["token_hash"],
+            user_id=row["user_id"],
+            expires_at=datetime.fromisoformat(row["expires_at"]),
+        )
+
+    def delete_session(self, token_hash: str) -> None:
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute(
+                "DELETE FROM sessions WHERE token_hash = ?",
+                (token_hash,),
+            )
+
