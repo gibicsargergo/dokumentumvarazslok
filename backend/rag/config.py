@@ -37,12 +37,3 @@ SCORE_CLIFF_RATIO = 0.5
 # --- Chroma ----------------------------------------------------------------
 COLLECTION_NAME = "documents"
 DISTANCE_METRIC = "cosine"
-
-# --- LLM Settings ----------------------------------------------------------
-# Environment variables set for local llm use
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "ollama")
-OPENAI_BASE_URL = os.environ.get("OPENAI_BASE_URL", "http://localhost:11434/v1")
-LLM_MODEL = os.environ.get("LLM_MODEL", "qwen3:4b")
-# Creativity and diversity of words in the result answer.
-# At a low value (0.0 - 0.2) the answer will be deterministic and fact based.
-LLM_TEMPERATURE = float(os.environ.get("LLM_TEMPERATURE", "0.2"))

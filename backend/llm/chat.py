@@ -1,7 +1,8 @@
 from typing import AsyncGenerator, List, Dict, Any
 from openai import AsyncOpenAI
+from openai.types.chat import ChatCompletionMessageParam
 
-from rag.config import (
+from .config import (
     OPENAI_API_KEY,
     OPENAI_BASE_URL,
     LLM_MODEL,
@@ -34,7 +35,7 @@ async def stream_rag_response(query: str, hits: List[Dict[str, Any]]) -> AsyncGe
     context_str = build_context_string(hits)
     system_content = SYSTEM_PROMPT_TEMPLATE.format(context=context_str)
 
-    messages = [
+    messages: list[ChatCompletionMessageParam] = [
         {"role": "system", "content": system_content},
         {"role": "user", "content": query}
     ]
@@ -47,6 +48,7 @@ async def stream_rag_response(query: str, hits: List[Dict[str, Any]]) -> AsyncGe
     )
     
     async for chunk in response_stream:
-        content = chunk.choices.delta.content
-        if content:
-            yield content
+        for choice in chunk.choices:
+            content = choice.delta.content
+            if content:
+                yield content
