@@ -1,0 +1,95 @@
+import sqlite3
+from filestore.config import STORAGE_DIR, DB_NAME
+import uuid
+from .models import User
+
+DB_PATH = STORAGE_DIR / DB_NAME
+
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS users (
+    id TEXT PRIMARY KEY,
+    email TEXT NOT NULL UNIQUE,
+    password_hash TEXT NOT NULL,
+    role TEXT NOT NULL DEFAULT 'user'
+        CHECK (role IN ('user', 'admin'))
+);
+
+CREATE TABLE IF NOT EXISTS sessions (
+    token_hash TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    FOREIGN KEY (user_id) REFERENCES users(id)
+        ON DELETE CASCADE
+);
+"""
+
+
+def initialize_auth_db():
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.executescript(_SCHEMA)
+
+
+class AuthStore:
+    def __init__(self):
+        initialize_auth_db()
+
+    def create_user(self, email: str, password_hash: str) -> User:
+        user_id = uuid.uuid4().hex
+        email = email.strip().lower()
+
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute(
+                """
+                INSERT INTO users (id, email, password_hash, role)
+                VALUES (?, ?, ?, ?)
+                """,
+                (user_id, email, password_hash, "user"),
+            )
+
+        return User(
+            id=user_id,
+            email=email,
+            password_hash=password_hash,
+            role="user",
+        )
+
+    def get_user_by_email(self, email: str) -> User | None:
+        email = email.strip().lower()
+
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT * FROM users WHERE email = ?",
+                (email,),
+            ).fetchone()
+
+        if row is None:
+            return None
+
+        return User(
+            id=row["id"],
+            email=row["email"],
+            password_hash=row["password_hash"],
+            role=row["role"],
+        )
+
+    def get_user_by_id(self, user_id: str) -> User | None:
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT * FROM users WHERE id = ?",
+                (user_id,),
+            ).fetchone()
+
+        if row is None:
+            return None
+
+        return User(
+            id=row["id"],
+            email=row["email"],
+            password_hash=row["password_hash"],
+            role=row["role"],
+        )
