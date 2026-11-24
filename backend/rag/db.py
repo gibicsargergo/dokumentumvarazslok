@@ -51,8 +51,15 @@ class KnowledgeBase:
         title: str | None = None,
         category: str | None = None,
         tags: list[str] | None = None,
+        *,
+        uploader_id: str,
+        is_private: bool = False,
     ) -> dict:
-        """Ingest one file: copy it to storage, extract, chunk, embed, store."""
+        """Ingest one file: copy it to storage, extract, chunk, embed, store.
+
+        *uploader_id* and *is_private* are copied onto every chunk so that
+        :meth:`search` can hide private documents from other users.
+        """
         src = Path(path)
         doc: DocumentFile = load(src)  # raises on unsupported extension
         doc_id = uuid.uuid4().hex
@@ -77,6 +84,8 @@ class KnowledgeBase:
                     "source": str(dest),
                     "filename": doc.filename,
                     "created_at": now,
+                    "uploader_id": uploader_id,
+                    "is_private": bool(is_private),
                 }
             )
 
@@ -93,6 +102,46 @@ class KnowledgeBase:
             embeddings=vectors.tolist(),
         )
         return {"id": doc_id, "chunks": len(texts)}
+
+    def set_visibility(self, doc_id: str, is_private: bool) -> int:
+        """Mirror a document's privacy flag onto all of its chunks; returns the chunk count."""
+        existing = self.collection.get(where={"doc_id": doc_id}, include=["metadatas"])
+        ids = existing.get("ids", [])
+        if ids:
+            self.collection.update(
+                ids=ids,
+                metadatas=[{"is_private": bool(is_private)} for _ in ids],
+            )
+        return len(ids)
+
+    def update_metadata(
+        self,
+        doc_id: str,
+        *,
+        title: str | None = None,
+        category: str | None = None,
+        tags: list[str] | None = None,
+    ) -> int:
+        """Mirror metadata edits onto every chunk of *doc_id*; returns the chunk count.
+
+        ``None`` leaves a field unchanged, so callers send only what changed.
+        Only the per-chunk metadata copy is rewritten -- text and vectors stay.
+        """
+        partial: chromadb.Metadata = {}
+        if title is not None:
+            partial["title"] = title
+        if category is not None:
+            partial["category"] = category
+        if tags is not None:
+            partial["tags"] = ",".join(tags)
+        if not partial:
+            return 0
+
+        ids = self.collection.get(where={"doc_id": doc_id}).get("ids", [])
+        if not ids:
+            return 0
+        self.collection.update(ids=ids, metadatas=[dict(partial) for _ in ids])
+        return len(ids)
 
     # -- read ------------------------------------------------------------
     def delete(self, doc_id: str) -> int:
@@ -129,18 +178,39 @@ class KnowledgeBase:
             entry["source"] = meta.get("source", "")
         return list(grouped.values())
 
-    def search(self, query: str, k: int | None = None) -> list[dict]:
-        """Embed query -> cosine top-N -> BM25+fuzzy rerank -> top-k above threshold."""
+    def search(
+        self,
+        query: str,
+        k: int | None = None,
+        *,
+        viewer_id: str | None = None,
+        see_all: bool = False,
+    ) -> list[dict]:
+        """Embed query -> cosine top-N -> BM25+fuzzy rerank -> top-k above threshold.
+
+        Only chunks the caller may see are considered: public chunks plus the
+        private ones uploaded by *viewer_id*. ``see_all=True`` (admins) lifts
+        the restriction. The filter runs inside the vector query, so hidden
+        documents never take up candidate slots.
+        """
         k = k or RETURN_K
         count = self.collection.count()
         if count == 0:
             return []
+
+        where: chromadb.Where | None = None
+        if not see_all:
+            public: chromadb.Where = {"is_private": False}
+            where = (
+                {"$or": [public, {"uploader_id": viewer_id}]} if viewer_id else public
+            )
 
         qvec = Embedder.embed_query(query).tolist()
         n_results = min(TOP_K_CANDIDATES, count)
         res = self.collection.query(
             query_embeddings=[qvec],
             n_results=n_results,
+            where=where,
             include=["documents", "metadatas", "distances"],
         )
         _docs = res["documents"]
@@ -182,6 +252,7 @@ class KnowledgeBase:
                     "source": meta.get("source", ""),
                     "filename": meta.get("filename", ""),
                     "doc_id": meta.get("doc_id", ""),
+                    "is_private": bool(meta.get("is_private", False)),
                 }
             )
             prev_score = item["score"]

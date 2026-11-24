@@ -32,6 +32,7 @@ backend/
   pyrightconfig.json   # type-checker config (strict, venv-pinned)
   rag/                 # RAG core — see rag/README.md
   llm/                 # LLM client — see llm/config.py (own LLM settings)
-  storage/             # raw uploaded files (runtime, gitignored)
+  filestore/           # uploaded file storage + metadata — see filestore/README.md
+  storage/             # raw uploaded files + filestore metadata.db (runtime, gitignored)
   chroma_data/         # persistent ChromaDB (runtime, gitignored)
 ```
