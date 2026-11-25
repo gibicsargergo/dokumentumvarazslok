@@ -1,77 +1,165 @@
-import { mockDocuments } from "../lib/documentsStub";
+import { useEffect, useState } from 'react';
+import type { Document } from '../types/document';
+import {
+  deleteDocument,
+  listDocuments,
+  updateDocument,
+  uploadDocument,
+  type DocumentUpdate,
+  type UploadDraft,
+} from '../lib/documents';
+import UploadDocumentModal from '../components/UploadDocumentModal';
+import EditDocumentModal from '../components/EditDocumentModal';
 
 export default function DocumentsPage() {
-  // Temporary user until authentication is implemented
-  const currentUser = {
-    id: 'user1',
-    isAdmin: false,
-  };
+  const [documents, setDocuments] = useState<Document[]>([]);
+  const [uploadOpen, setUploadOpen] = useState(false);
+  const [editing, setEditing] = useState<Document | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
-  const visibleDocuments = mockDocuments.filter(
-    (doc) =>
-      doc.visibility === 'public' ||
-      doc.uploaderId === currentUser.id
-  );
+  useEffect(() => {
+    let cancelled = false;
+    listDocuments()
+      .then((docs) => {
+        if (!cancelled) setDocuments(docs);
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setLoadError(err instanceof Error ? err.message : 'Failed to load documents');
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  async function refresh() {
+    try {
+      const docs = await listDocuments();
+      setDocuments(docs);
+      setLoadError(null);
+    } catch (err) {
+      setLoadError(err instanceof Error ? err.message : 'Failed to load documents');
+    }
+  }
+
+  async function handleUpload(draft: UploadDraft) {
+    await uploadDocument(draft);
+    setUploadOpen(false);
+    await refresh();
+  }
+
+  async function handleSave(id: string, patch: DocumentUpdate) {
+    const doc = documents.find((d) => d.id === id);
+    if (!doc) return;
+    const updated = await updateDocument(doc, patch);
+    setDocuments((docs) => docs.map((d) => (d.id === id ? updated : d)));
+    setEditing(null);
+  }
+
+  async function handleDelete(id: string) {
+    await deleteDocument(id);
+    setDocuments((docs) => docs.filter((d) => d.id !== id));
+    setEditing(null);
+  }
 
   return (
-    <main className="mx-auto max-w-6xl px-6 py-8">
-      <h1 className="mb-6 text-3xl font-semibold">
-        Documents
-      </h1>
+    <div className="mx-auto flex min-h-screen w-full max-w-6xl flex-col gap-6 px-4 py-8 sm:px-6">
+      <header className="flex flex-wrap items-end justify-between gap-4">
+        <div>
+          <h1 className="text-3xl font-semibold tracking-tight text-ink">Documents</h1>
+          <p className="mt-1 text-sm text-muted">
+            {documents.length} document{documents.length === 1 ? '' : 's'}
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={() => setUploadOpen(true)}
+          className="rounded-lg bg-ink px-4 py-2 text-sm font-medium text-white transition hover:bg-emphasis"
+        >
+          Add document
+        </button>
+      </header>
 
-      <div className="overflow-x-auto rounded-lg border border-line">
-        <table className="w-full text-left">
-          <thead className="bg-track">
-            <tr>
-              <th className="p-4">Name</th>
-              <th className="p-4">Type</th>
-              <th className="p-4">Category</th>
-              <th className="p-4">Uploaded</th>
-              <th className="p-4">Uploader</th>
-              <th className="p-4">Labels</th>
-              <th className="p-4">Visibility</th>
-              <th className="p-4">Actions</th>
-            </tr>
-          </thead>
+      {loadError && (
+        <p role="alert" className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+          Could not load documents: {loadError}
+        </p>
+      )}
 
-          <tbody>
-            {visibleDocuments.map((doc) => {
-              const isOwner =
-                doc.uploaderId === currentUser.id;
-
-              const canEdit =
-                isOwner || currentUser.isAdmin;
-
-              return (
-                <tr key={doc.id} className="border-t border-line">
-                  <td className="p-4">{doc.name}</td>
-                  <td className="p-4">{doc.type}</td>
-                  <td className="p-4">{doc.category}</td>
-                  <td className="p-4">{doc.uploadedAt}</td>
-                  <td className="p-4">
-                    {isOwner ? doc.uploaderName : '—'}
+      {documents.length === 0 && !loadError ? (
+        <div className="flex flex-1 flex-col items-center justify-center gap-2 py-20 text-center">
+          <p className="text-lg font-medium text-ink">No documents yet</p>
+          <p className="max-w-sm text-sm text-muted">
+            Upload your first document to get started.
+          </p>
+        </div>
+      ) : (
+        <div className="overflow-x-auto rounded-xl border border-line bg-surface">
+          <table className="w-full min-w-[680px] text-left text-sm">
+            <thead>
+              <tr className="border-b border-line text-xs uppercase tracking-wide text-subtle">
+                <th className="px-4 py-3 font-medium">Name</th>
+                <th className="px-4 py-3 font-medium">Category</th>
+                <th className="px-4 py-3 font-medium">Labels</th>
+                <th className="px-4 py-3 font-medium">Chunks</th>
+                <th className="px-4 py-3 text-right font-medium">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {documents.map((doc) => (
+                <tr key={doc.id} className="border-b border-line last:border-0">
+                  <td className="max-w-[280px] truncate px-4 py-3 font-medium text-ink">
+                    {doc.name}
                   </td>
-                  <td className="p-4">
-                    {doc.labels.join(', ')}
+                  <td className="px-4 py-3 text-body">{doc.category || '—'}</td>
+                  <td className="px-4 py-3">
+                    <div className="flex flex-wrap gap-1">
+                      {doc.labels.length === 0 ? (
+                        <span className="text-subtle">—</span>
+                      ) : (
+                        doc.labels.map((label) => (
+                          <span
+                            key={label}
+                            className="rounded-full bg-track px-2 py-0.5 text-xs text-subtle"
+                          >
+                            {label}
+                          </span>
+                        ))
+                      )}
+                    </div>
                   </td>
-                  <td className="p-4">{doc.visibility}</td>
-                  <td className="p-4">
-                    {canEdit && (
-                      <button
-                        type="button"
-                        disabled
-                        className="text-subtle"
-                      >
-                        Edit
-                      </button>
-                    )}
+                  <td className="px-4 py-3 text-body">{doc.chunks}</td>
+                  <td className="px-4 py-3 text-right">
+                    <button
+                      type="button"
+                      onClick={() => setEditing(doc)}
+                      className="rounded-lg border border-line px-3 py-1.5 text-xs font-medium text-subtle transition hover:text-emphasis"
+                    >
+                      Edit
+                    </button>
                   </td>
                 </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      </div>
-    </main>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {uploadOpen && (
+        <UploadDocumentModal
+          onClose={() => setUploadOpen(false)}
+          onUpload={handleUpload}
+        />
+      )}
+      {editing && (
+        <EditDocumentModal
+          document={editing}
+          onClose={() => setEditing(null)}
+          onSave={handleSave}
+          onDelete={handleDelete}
+        />
+      )}
+    </div>
   );
 }

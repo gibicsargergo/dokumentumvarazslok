@@ -1,15 +1,11 @@
-export type DocumentType = 'text' | 'pdf' | 'image'
-
-export type DocumentVisibility = 'public' | 'private'
+// Documents come from the merged backend: GET /documents returns the vector
+// index view (title/category/tags/chunks), not the filestore metadata.
+export type DocumentVisibility = 'public' | 'private';
 
 export interface Document {
-    id: string;
-    name: string;
-    type: DocumentType;
-    category: string;
-    uploadedAt: string;
-    uploaderId: string;
-    uploaderName: string;
-    labels: string[];
-    visibility: DocumentVisibility
+  id: string;
+  name: string;
+  category: string;
+  labels: string[];
+  chunks: number;
 }
