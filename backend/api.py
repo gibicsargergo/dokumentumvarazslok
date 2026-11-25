@@ -4,7 +4,7 @@ import json
 import shutil
 import tempfile
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from fastapi import (
     FastAPI,
@@ -24,6 +24,7 @@ from pydantic import BaseModel, EmailStr
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from filestore import Actor, FileStore, StoredFile, UnsupportedFileType, can_delete
 from rag import KnowledgeBase
 from llm import stream_rag_response
 
@@ -57,6 +58,14 @@ class UserResponse(BaseModel):
 class LoginResponse(BaseModel):
     token: str
     user: UserResponse
+      
+files = FileStore()
+
+def file_response(stored: StoredFile) -> dict[str, Any]:
+    '''A tárolt fájl metaadatai a kliens számára (a szerveroldali útvonal nélkül).'''
+    data = stored.to_dict()
+    data.pop("path", None)
+    return data
 
 class SearchRequest(BaseModel):
     query: str
@@ -78,7 +87,7 @@ class SearchHitResponse(BaseModel):
     doc_id: str
 
 class DeleteRequest(BaseModel):
-    doc_id: str
+    file_id: str
 
 class UpdateDocumentRequest(BaseModel):
     title: Optional[str] = None
@@ -196,7 +205,7 @@ def logout(
     return {"status": "success", "message": "Sikeres kijelentkezés."}
 
 @app.post("/add")
-async def add_document(
+def add_document(
     file: UploadFile = File(...),
     title: Optional[str] = Form(None),
     category: Optional[str] = Form(None),
@@ -205,42 +214,57 @@ async def add_document(
     current_user: User = Depends(get_current_user)
 ):
     '''
-        Új fájl feltöltése és feldolgozása.
-        A mentést, szövegkinyerést (OCR-rel), chunkolást és beágyazást a kb.add() végzi.
+        Új fájl feltöltése: az eredeti fájl és metaadatai a FileStore-ba kerülnek,
+        majd a kb.add() kinyeri a szöveget (OCR-rel), chunkol és beágyaz.
+        Ha az indexelés nem sikerül, a fájl ettől még tárolva marad.
     '''
     if not file.filename:
         raise HTTPException(status_code=400, detail="A feltöltött fájlnak nincs neve.")
-    suffix = Path(file.filename).suffix
+    
     tags_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else None
 
-    # Ideiglenes mentés
-    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-        shutil.copyfileobj(file.file, tmp)
-        tmp_path = tmp.name
+    # 1) Eredeti fájl + metaadatok mentése
+    try:
+        stored = files.save(
+            file.file,
+            filename=file.filename,
+            uploader_id=ACTOR.user_id,
+            name=title,
+            category=category or "",
+            labels=tags_list,
+            is_private=is_private,
+        )
+    except UnsupportedFileType as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
+    # 2) Szövegkinyerés + indexelés
     try:
         result = kb.add(
-            path=tmp_path,
-            title=title or file.filename,
-            category=category,
-            tags=tags_list,
-            uploader_id=current_user.id,
-            is_private=is_private            
+            stored.path,
+            title=stored.name,
+            category=stored.category,
+            tags=list(stored.labels),
+            uploader_id=stored.uploader_id,
+            is_private=stored.is_private,
         )
-        return{
-            "status": "success",
-            "doc_id": result["id"],
-            "chunks_created": result["chunks"],
-            "filename": file.filename,
-            "uploader_id": current_user.id,
-            "is_private": is_private
-        }
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Hiba a fájl feldolgozásakor: {str(e)}")
-    finally:
-        # Ideiglenes fájl eltakarítása
-        if os.path.exists(tmp_path):
-            os.remove(tmp_path)
+        return {
+            "status": "stored",
+            "indexed": False,
+            "error": f"Hiba a fájl feldolgozásakor: {str(e)}",
+            "chunks_created": 0,
+            "file": file_response(stored),
+        }
+
+    if result["chunks"]:
+        files.set_index_id(stored.id, result["id"])
+        stored = files.get(stored.id) or stored
+    return {
+        "status": "success",
+        "indexed": bool(result["chunks"]),
+        "chunks_created": result["chunks"],
+        "file": file_response(stored),
+    }
 
 @app.post("/search", response_model=List[SearchHitResponse])
 def search_chunks(
@@ -306,11 +330,26 @@ def delete_document(
     '''
         Dokumentum és annak összes chunkjának törlése a vektoradatbázisból és a tárolóból.
     '''
-    deleted_chunks = kb.delete(request.doc_id)
-    if deleted_chunks == 0:
+    existing = kb.collection.get(where={"doc_id": request.doc_id}, include=["metadatas"])
+    metadatas = existing.get("metadatas") or []
+
+    # Törlendő fájl keresése tárolóból
+    if not metadatas:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Nem található dokumentum a megadott azonosítóval: {request.doc_id}")
+            detail=f"Nem található dokumentum a megadott azonosítóval: {request.doc_id}"
+        )
+
+    # Jogosultság ellenőrzése
+    doc_uploader_id = metadatas[0].get("uploader_id")
+    if current_user.role != "admin" and doc_uploader_id != current_user.id:
+        raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Nincs jogosultságod más felhasználó dokumentumának törlésére."
+        )
+
+    # Törlés
+    deleted_chunks = kb.delete(request.doc_id)
     return {
         "status": "success",
         "doc_id": request.doc_id,
@@ -322,7 +361,24 @@ def list_documents(current_user: Optional[User] = Depends(get_optional_current_u
     '''
         Eltárolt dokumentumok kilistázása.
     '''
-    return kb.list_documents()
+    all_docs = kb.list_documents()
+
+    # Az admin felhasználó szűrés nélkül minden dokumentumot megkap
+    if current_user and current_user.role == "admin":
+        return all_docs
+
+    # Az átlagos felhasználó csak a saját és a publikus dokumentumokat láthatja
+    filtered_docs = []
+    for doc in all_docs:
+        is_private = doc.get("is_private", False)
+        uploader_id = doc.get("uploader_id", "")
+
+        if not is_private:
+            filtered_docs.append(doc)
+        elif current_user and uploader_id == current_user.id:
+            filtered_docs.append(doc)
+
+    return filtered_docs
 
 @app.websocket("/chat")
 async def websocket_chat(websocket: WebSocket):
