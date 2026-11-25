@@ -221,14 +221,14 @@ def add_document(
     if not file.filename:
         raise HTTPException(status_code=400, detail="A feltöltött fájlnak nincs neve.")
     
-    tags_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else None
+    tags_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else []
 
     # 1) Eredeti fájl + metaadatok mentése
     try:
         stored = files.save(
             file.file,
             filename=file.filename,
-            uploader_id=ACTOR.user_id,
+            uploader_id=current_user.id,
             name=title,
             category=category or "",
             labels=tags_list,
@@ -301,6 +301,25 @@ def update_document(
     '''
         Dokumentum metaadatainak frissítése.
     '''
+    existing = kb.collection.get(where={"doc_id": id}, include=["metadatas"])
+    metadatas = existing.get("metadatas") or []
+
+    if not metadatas:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Nem található dokumentum a megadott azonosítóval: {id}"
+        )
+
+    # Jogosultság ellenőrzése
+    first_meta = metadatas[0] if isinstance(metadatas, list) and len(metadatas) > 0 else {}
+    doc_uploader_id = first_meta.get("uploader_id")
+
+    if current_user.role != "admin" and doc_uploader_id != current_user.id:
+        raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Nincs jogosultságod más felhasználó dokumentumának módosítására."
+        )
+
     updated_chunks = 0
 
     if any(v is not None for v in [request.title, request.category, request.tags]):
@@ -313,12 +332,6 @@ def update_document(
 
     if request.is_private is not None:
         updated_chunks = kb.set_visibility(id, is_private=request.is_private)
-
-    if updated_chunks == 0:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Dokumentum nem található vagy nem történt módosítás."
-        )
     
     return {"status": "success", "doc_id": id, "updated_chunks": updated_chunks}
 
@@ -330,14 +343,13 @@ def delete_document(
     '''
         Dokumentum és annak összes chunkjának törlése a vektoradatbázisból és a tárolóból.
     '''
-    existing = kb.collection.get(where={"doc_id": request.doc_id}, include=["metadatas"])
+    existing = kb.collection.get(where={"doc_id": request.file_id}, include=["metadatas"])
     metadatas = existing.get("metadatas") or []
 
-    # Törlendő fájl keresése tárolóból
     if not metadatas:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Nem található dokumentum a megadott azonosítóval: {request.doc_id}"
+            detail=f"Nem található dokumentum a megadott azonosítóval: {request.file_id}"
         )
 
     # Jogosultság ellenőrzése
@@ -349,10 +361,10 @@ def delete_document(
         )
 
     # Törlés
-    deleted_chunks = kb.delete(request.doc_id)
+    deleted_chunks = kb.delete(request.file_id)
     return {
         "status": "success",
-        "doc_id": request.doc_id,
+        "doc_id": request.file_id,
         "deleted_chunks": deleted_chunks
     }
 
