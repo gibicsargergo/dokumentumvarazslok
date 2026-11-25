@@ -49,18 +49,24 @@ async function request<T>(
 }
 
 export const authApi = {
+    // The backend does not create a session on register (no Set-Cookie), so
+    // log in right away to establish the session the rest of the app needs.
     register(data: RegisterRequest): Promise<User> {
         return request<User>('/register', {
             method: 'POST',
             body: JSON.stringify(data),
-        });
+        }).then(() =>
+            authApi.login({ email: data.email, password: data.password }),
+        );
     },
 
+    // The backend returns { token, user } (and sets the session cookie); the
+    // cookie carries the session, so only the user is used.
     login(data: LoginRequest): Promise<User> {
-        return request<User>('/login', {
+        return request<{ token: string; user: User }>('/login', {
             method: 'POST',
             body: JSON.stringify(data),
-        });
+        }).then((data) => data.user);
     },
 
     getCurrentUser(): Promise<User> {
