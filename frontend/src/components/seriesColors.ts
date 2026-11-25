@@ -1,4 +1,4 @@
-import { OTHERS_ID } from '../lib/searchStatsStub';
+import { OTHERS_ID } from '../lib/searchStats';
 
 const SERIES_COLORS = [
   'var(--color-series-1)',
