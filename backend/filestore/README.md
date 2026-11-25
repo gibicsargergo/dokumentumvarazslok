@@ -102,6 +102,17 @@ f = fs.update(stored.id, actor=admin, is_private=True)
 if f.index_id:
     kb.set_visibility(f.index_id, f.is_private)
 
+# renaming / recategorizing / relabeling: update both sides
+f = fs.update(
+    stored.id,
+    actor=admin,
+    name="Új cím",
+    category="előadás",
+    labels=["cloud", "intro"],
+)
+if f.index_id:
+    kb.update_metadata(f.index_id, title=f.name, category=f.category, tags=list(f.labels))
+
 kb.delete(stored.index_id); fs.delete(stored.id, actor=admin)  # delete both
 ```
 

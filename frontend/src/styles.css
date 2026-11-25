@@ -19,4 +19,13 @@
 
   /* Lines */
   --color-line: #d1d5db;    /* borders                         (was border-gray-300)*/
+
+  /* Charts */
+  --color-series-1: #2a78d6;      /* blue    */
+  --color-series-2: #eb6834;      /* orange  */
+  --color-series-3: #1baf7a;      /* aqua    */
+  --color-series-4: #eda100;      /* yellow  */
+  --color-series-5: #e87ba4;      /* magenta */
+  --color-series-other: #898781;  /* "Others" bucket */
+  --color-grid: #e5e7eb;          /* chart gridlines */
 }
