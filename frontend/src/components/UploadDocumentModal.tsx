@@ -82,7 +82,7 @@ export default function UploadDocumentModal({ onClose, onUpload }: Props) {
     setError(null);
     try {
       await onUpload({
-        filename: file.name,
+        file,
         name: name.trim(),
         category: category.trim(),
         labels: splitLabels(labelsInput),
