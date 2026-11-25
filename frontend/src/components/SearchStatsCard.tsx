@@ -1,7 +1,7 @@
 import LineChart from './LineChart';
 import RankedList from './RankedList';
 import { seriesColor } from './seriesColors';
-import { statsForPeriod, type SearchStats, type StatsPeriod } from '../lib/searchStatsStub';
+import { statsForPeriod, type SearchStats, type StatsPeriod } from '../lib/searchStats';
 
 interface SearchStatsCardProps  {
   title: string;

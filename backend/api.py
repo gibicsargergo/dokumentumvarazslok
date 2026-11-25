@@ -1,16 +1,16 @@
-import os
-import sys
 import json
 import shutil
+import sys
 import tempfile
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Annotated, Any, List, Literal, Optional
 
 from fastapi import (
     FastAPI,
     UploadFile,
     File,
     Form,
+    Query,
     WebSocket,
     WebSocketDisconnect,
     HTTPException,
@@ -27,6 +27,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from filestore import Actor, FileStore, StoredFile, UnsupportedFileType, can_delete
 from rag import KnowledgeBase
 from llm import stream_rag_response
+from stats import Mode, QueryHit, StatsStore
+from stats.config import DEFAULT_MONTHS
 
 # Authentikációs modulok importálása
 from auth.store import AuthStore
@@ -39,8 +41,9 @@ app = FastAPI(
     version="1.0.0" )
 
 kb = KnowledgeBase()
-auth_store = AuthStore() 
+auth_store = AuthStore()
 auth_service = AuthService(auth_store)
+stats = StatsStore()
 
 class RegisterRequest(BaseModel):
     email: str
@@ -67,6 +70,48 @@ def file_response(stored: StoredFile) -> dict[str, Any]:
     data.pop("path", None)
     return data
 
+def attach_file_ids(hits: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    '''A keresési találatokhoz hozzáadja a FileStore azonosítót (file_id).'''
+    cache: dict[str, Optional[str]] = {}
+    for h in hits:
+        doc_id = h["doc_id"]
+        if doc_id not in cache:
+            stored = files.get_by_index_id(doc_id)  # belső hozzáférés: a kb már szűrt
+            cache[doc_id] = stored.id if stored else None
+        h["file_id"] = cache[doc_id]
+    return hits
+
+def log_query(user_id: Optional[str], mode: Mode, query: str, hits: list[dict[str, Any]]) -> Optional[int]:
+    '''Kérdés és találatai naplózása. Hiba esetén nem akasztja meg a keresést.'''
+    try:
+        return stats.log_query(
+            user_id=user_id or "anonymous",
+            mode=mode,
+            query=query,
+            hits=[
+                QueryHit(
+                    file_id=h.get("file_id"),
+                    title=h["title"],
+                    category=h["category"],
+                    rank=i,
+                    score=h["score"],
+                )
+                for i, h in enumerate(hits)
+            ],
+        )
+    except Exception as err:
+        print(f"[stats] naplózási hiba: {err}")
+        return None
+
+def record_answer(query_id: Optional[int], *, answer: Optional[str] = None, error: Optional[str] = None) -> None:
+    '''A chat válaszának (vagy hibájának) hozzáfűzése a naplózott kérdéshez.'''
+    if query_id is None:
+        return
+    try:
+        stats.record_answer(query_id, answer=answer, error=error)
+    except Exception as err:
+        print(f"[stats] naplózási hiba: {err}")
+
 class SearchRequest(BaseModel):
     query: str
     k: Optional[int] = 5
@@ -85,6 +130,7 @@ class SearchHitResponse(BaseModel):
     source: str
     filename: str
     doc_id: str
+    file_id: Optional[str] = None
 
 class DeleteRequest(BaseModel):
     file_id: str
@@ -204,6 +250,19 @@ def logout(
     response.delete_cookie("session_token")
     return {"status": "success", "message": "Sikeres kijelentkezés."}
 
+class StatItem(BaseModel):
+    id: str
+    label: str
+    monthly: List[int]
+
+class SearchStats(BaseModel):
+    months: List[str]
+    items: List[StatItem]
+
+class SearchStatsResponse(BaseModel):
+    documents: SearchStats
+    categories: SearchStats
+
 @app.post("/add")
 def add_document(
     file: UploadFile = File(...),
@@ -221,14 +280,14 @@ def add_document(
     if not file.filename:
         raise HTTPException(status_code=400, detail="A feltöltött fájlnak nincs neve.")
     
-    tags_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else None
+    tags_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else []
 
     # 1) Eredeti fájl + metaadatok mentése
     try:
         stored = files.save(
             file.file,
             filename=file.filename,
-            uploader_id=ACTOR.user_id,
+            uploader_id=current_user.id,
             name=title,
             category=category or "",
             labels=tags_list,
@@ -288,9 +347,11 @@ def search_chunks(
             viewer_id=viewer_id,
             see_all=see_all
         )
-        return results
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Keresési hiba: {str(e)}")
+    attach_file_ids(results)
+    log_query(viewer_id, "search", request.query, results)
+    return results
 
 @app.patch("/documents/{id}")
 def update_document(
@@ -301,11 +362,36 @@ def update_document(
     '''
         Dokumentum metaadatainak frissítése.
     '''
+    actor = Actor(user_id=current_user.id, role=current_user.role)
+    
+    stored = files.get(id, viewer=actor) or files.get_by_index_id(id, viewer=actor)
+    if stored is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Nem található dokumentum a megadott azonosítóval: {id}"
+        )
+    
+    if not (actor.is_admin or stored.uploader_id == actor.user_id):
+        raise HTTPException(
+                            status_code=status.HTTP_403_FORBIDDEN,
+                            detail="Nincs jogosultságod más felhasználó dokumentumának módosítására."
+        )
+
+    updated_file = files.update(
+        stored.id,
+        actor=actor,
+        name=request.title,
+        category=request.category,
+        labels=request.tags,
+        is_private=request.is_private
+    )    
+
     updated_chunks = 0
+    index_id = stored.index_id or stored.id
 
     if any(v is not None for v in [request.title, request.category, request.tags]):
         updated_chunks = kb.update_metadata(
-            id,
+            index_id,
             title=request.title,
             category=request.category,
             tags=request.tags
@@ -313,14 +399,13 @@ def update_document(
 
     if request.is_private is not None:
         updated_chunks = kb.set_visibility(id, is_private=request.is_private)
-
-    if updated_chunks == 0:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Dokumentum nem található vagy nem történt módosítás."
-        )
     
-    return {"status": "success", "doc_id": id, "updated_chunks": updated_chunks}
+    return {
+        "status": "success",
+        "file_id": updated_file.id,
+        "index_id": index_id,
+        "updated_chunks": updated_chunks
+    }
 
 @app.delete("/delete")
 def delete_document(
@@ -330,29 +415,29 @@ def delete_document(
     '''
         Dokumentum és annak összes chunkjának törlése a vektoradatbázisból és a tárolóból.
     '''
-    existing = kb.collection.get(where={"doc_id": request.doc_id}, include=["metadatas"])
-    metadatas = existing.get("metadatas") or []
+    actor = Actor(user_id=current_user.id, role=current_user.role)
 
-    # Törlendő fájl keresése tárolóból
-    if not metadatas:
+    stored = files.get(request.file_id, viewer=actor) or files.get_by_index_id(request.file_id, viewer=actor)
+    if stored is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Nem található dokumentum a megadott azonosítóval: {request.doc_id}"
+            detail=f"Nem található dokumentum a megadott azonosítóval: {request.file_id}"
         )
 
-    # Jogosultság ellenőrzése
-    doc_uploader_id = metadatas[0].get("uploader_id")
-    if current_user.role != "admin" and doc_uploader_id != current_user.id:
+    if not (actor.is_admin or stored.uploader_id == actor.user_id):
         raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail="Nincs jogosultságod más felhasználó dokumentumának törlésére."
+                            status_code=status.HTTP_403_FORBIDDEN,
+                            detail="Nincs jogosultságod más felhasználó dokumentumának törlésére."
         )
 
-    # Törlés
-    deleted_chunks = kb.delete(request.doc_id)
+    index_id = stored.index_id or stored.id
+    deleted_chunks = kb.delete(index_id) if index_id else 0
+    files.delete(stored.id, actor=actor)
+
     return {
         "status": "success",
-        "doc_id": request.doc_id,
+        "file_id": stored.id,
+        "index_id": index_id,
         "deleted_chunks": deleted_chunks
     }
 
@@ -380,6 +465,35 @@ def list_documents(current_user: Optional[User] = Depends(get_optional_current_u
 
     return filtered_docs
 
+@app.get("/admin/stats", response_model=SearchStatsResponse)
+def search_stats(
+    months: Annotated[int, Query(ge=1, le=120)] = DEFAULT_MONTHS,
+    current_user: User = Depends(get_current_user)
+):
+    '''
+        A leggyakrabban keresett dokumentumok és kategóriák (témák) havi bontásban.
+        Egy dokumentum akkor számít keresettnek, ha szerepelt egy kérdés találatai között.
+    '''
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="A statisztika csak adminisztrátornak érhető el.")
+
+    def build(kind: Literal["document", "category"]) -> SearchStats:
+        keys, counts = stats.monthly_counts(kind, months)
+        titles = stats.last_titles() if kind == "document" else {}
+        items: list[StatItem] = []
+        for key, monthly in counts.items():
+            if kind == "document":
+                stored = files.get(key)
+                label = stored.name if stored else f"{titles.get(key, key)} (törölve)"
+                item_id = key
+            else:
+                label = key or "(kategória nélkül)"
+                item_id = f"cat:{key}"
+            items.append(StatItem(id=item_id, label=label, monthly=monthly))
+        return SearchStats(months=keys, items=items)
+
+    return SearchStatsResponse(documents=build("document"), categories=build("category"))
+
 @app.websocket("/chat")
 async def websocket_chat(websocket: WebSocket):
     '''
@@ -405,13 +519,17 @@ async def websocket_chat(websocket: WebSocket):
             if not user_query.strip():
                 continue
 
+            query_id: Optional[int] = None
+            answer_parts: list[str] = []
             try:
                 # Keresés a felhasználó jogosultsági szintjével
                 hits = kb.search(
                     query=user_query,
                     viewer_id=viewer_id,
-                    see_all=see_all
-                    )
+                    see_all=see_all,
+                )
+                attach_file_ids(hits)
+                query_id = log_query(viewer_id, "chat", user_query, hits)
 
                 # Felhasznált források elküldése a kliensnek
                 sources_payload = {
@@ -421,6 +539,7 @@ async def websocket_chat(websocket: WebSocket):
                             "title": h["title"],
                             "page": h["page"],
                             "doc_id": h["doc_id"],
+                            "file_id": h["file_id"],
                             "score": h["score"]
                         } for h in hits ]
                 }
@@ -428,11 +547,17 @@ async def websocket_chat(websocket: WebSocket):
 
                 # Válasz streamelése tokenenként
                 async for token in stream_rag_response(user_query, hits):
+                    answer_parts.append(token)
                     stream_payload = { "type": "token", "content": token }
                     await websocket.send_text(json.dumps(stream_payload))
                 await websocket.send_text(json.dumps({"type": "end"}))
+                record_answer(query_id, answer="".join(answer_parts))
 
+            except WebSocketDisconnect:
+                record_answer(query_id, answer="".join(answer_parts) or None, error="client disconnected")
+                raise
             except Exception as err:
+                record_answer(query_id, answer="".join(answer_parts) or None, error=str(err))
                 # Ha belső hiba történik nem szakítjuk meg a Websocketet
                 await websocket.send_text(json.dumps({"type": "error", "message": str(err)}))
     except WebSocketDisconnect:
