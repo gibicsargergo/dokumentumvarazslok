@@ -301,30 +301,36 @@ def update_document(
     '''
         Dokumentum metaadatainak frissítése.
     '''
-    existing = kb.collection.get(where={"doc_id": id}, include=["metadatas"])
-    metadatas = existing.get("metadatas") or []
-
-    if not metadatas:
+    actor = Actor(user_id=current_user.id, role=current_user.role)
+    
+    stored = files.get(id, viewer=actor) or files.get_by_index_id(id, viewer=actor)
+    if stored is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Nem található dokumentum a megadott azonosítóval: {id}"
         )
-
-    # Jogosultság ellenőrzése
-    first_meta = metadatas[0] if isinstance(metadatas, list) and len(metadatas) > 0 else {}
-    doc_uploader_id = first_meta.get("uploader_id")
-
-    if current_user.role != "admin" and doc_uploader_id != current_user.id:
+    
+    if not (actor.is_admin or stored.uploader_id == actor.user_id):
         raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail="Nincs jogosultságod más felhasználó dokumentumának módosítására."
+                            status_code=status.HTTP_403_FORBIDDEN,
+                            detail="Nincs jogosultságod más felhasználó dokumentumának módosítására."
         )
 
+    updated_file = files.update(
+        stored.id,
+        actor=actor,
+        name=request.title,
+        category=request.category,
+        labels=request.tags,
+        is_private=request.is_private
+    )    
+
     updated_chunks = 0
+    index_id = stored.index_id or stored.id
 
     if any(v is not None for v in [request.title, request.category, request.tags]):
         updated_chunks = kb.update_metadata(
-            id,
+            index_id,
             title=request.title,
             category=request.category,
             tags=request.tags
@@ -333,7 +339,12 @@ def update_document(
     if request.is_private is not None:
         updated_chunks = kb.set_visibility(id, is_private=request.is_private)
     
-    return {"status": "success", "doc_id": id, "updated_chunks": updated_chunks}
+    return {
+        "status": "success",
+        "file_id": updated_file.id,
+        "index_id": index_id,
+        "updated_chunks": updated_chunks
+    }
 
 @app.delete("/delete")
 def delete_document(
@@ -343,28 +354,29 @@ def delete_document(
     '''
         Dokumentum és annak összes chunkjának törlése a vektoradatbázisból és a tárolóból.
     '''
-    existing = kb.collection.get(where={"doc_id": request.file_id}, include=["metadatas"])
-    metadatas = existing.get("metadatas") or []
+    actor = Actor(user_id=current_user.id, role=current_user.role)
 
-    if not metadatas:
+    stored = files.get(request.file_id, viewer=actor) or files.get_by_index_id(request.file_id, viewer=actor)
+    if stored is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Nem található dokumentum a megadott azonosítóval: {request.file_id}"
         )
 
-    # Jogosultság ellenőrzése
-    doc_uploader_id = metadatas[0].get("uploader_id")
-    if current_user.role != "admin" and doc_uploader_id != current_user.id:
+    if not (actor.is_admin or stored.uploader_id == actor.user_id):
         raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail="Nincs jogosultságod más felhasználó dokumentumának törlésére."
+                            status_code=status.HTTP_403_FORBIDDEN,
+                            detail="Nincs jogosultságod más felhasználó dokumentumának törlésére."
         )
 
-    # Törlés
-    deleted_chunks = kb.delete(request.file_id)
+    index_id = stored.index_id or stored.id
+    deleted_chunks = kb.delete(index_id) if index_id else 0
+    files.delete(stored.id, actor=actor)
+
     return {
         "status": "success",
-        "doc_id": request.file_id,
+        "file_id": stored.id,
+        "index_id": index_id,
         "deleted_chunks": deleted_chunks
     }
 
