@@ -44,8 +44,8 @@ def can_view(actor: Actor, file: StoredFile) -> bool:
 
 
 def can_edit(actor: Actor, file: StoredFile) -> bool:  # noqa: ARG001 - owner rules may come later
-    return actor.is_admin
+    return actor.is_admin or actor.user_id == file.uploader_id
 
 
 def can_delete(actor: Actor, file: StoredFile) -> bool:  # noqa: ARG001 - owner rules may come later
-    return actor.is_admin
+    return actor.is_admin or actor.user_id == file.uploader_id
