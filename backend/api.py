@@ -280,7 +280,7 @@ def add_document(
     if not file.filename:
         raise HTTPException(status_code=400, detail="A feltöltött fájlnak nincs neve.")
     
-    tags_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else None
+    tags_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else []
 
     # 1) Eredeti fájl + metaadatok mentése
     try:
@@ -362,11 +362,36 @@ def update_document(
     '''
         Dokumentum metaadatainak frissítése.
     '''
+    actor = Actor(user_id=current_user.id, role=current_user.role)
+    
+    stored = files.get(id, viewer=actor) or files.get_by_index_id(id, viewer=actor)
+    if stored is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Nem található dokumentum a megadott azonosítóval: {id}"
+        )
+    
+    if not (actor.is_admin or stored.uploader_id == actor.user_id):
+        raise HTTPException(
+                            status_code=status.HTTP_403_FORBIDDEN,
+                            detail="Nincs jogosultságod más felhasználó dokumentumának módosítására."
+        )
+
+    updated_file = files.update(
+        stored.id,
+        actor=actor,
+        name=request.title,
+        category=request.category,
+        labels=request.tags,
+        is_private=request.is_private
+    )    
+
     updated_chunks = 0
+    index_id = stored.index_id or stored.id
 
     if any(v is not None for v in [request.title, request.category, request.tags]):
         updated_chunks = kb.update_metadata(
-            id,
+            index_id,
             title=request.title,
             category=request.category,
             tags=request.tags
@@ -374,14 +399,13 @@ def update_document(
 
     if request.is_private is not None:
         updated_chunks = kb.set_visibility(id, is_private=request.is_private)
-
-    if updated_chunks == 0:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Dokumentum nem található vagy nem történt módosítás."
-        )
     
-    return {"status": "success", "doc_id": id, "updated_chunks": updated_chunks}
+    return {
+        "status": "success",
+        "file_id": updated_file.id,
+        "index_id": index_id,
+        "updated_chunks": updated_chunks
+    }
 
 @app.delete("/delete")
 def delete_document(
@@ -391,29 +415,29 @@ def delete_document(
     '''
         Dokumentum és annak összes chunkjának törlése a vektoradatbázisból és a tárolóból.
     '''
-    existing = kb.collection.get(where={"doc_id": request.doc_id}, include=["metadatas"])
-    metadatas = existing.get("metadatas") or []
+    actor = Actor(user_id=current_user.id, role=current_user.role)
 
-    # Törlendő fájl keresése tárolóból
-    if not metadatas:
+    stored = files.get(request.file_id, viewer=actor) or files.get_by_index_id(request.file_id, viewer=actor)
+    if stored is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Nem található dokumentum a megadott azonosítóval: {request.doc_id}"
+            detail=f"Nem található dokumentum a megadott azonosítóval: {request.file_id}"
         )
 
-    # Jogosultság ellenőrzése
-    doc_uploader_id = metadatas[0].get("uploader_id")
-    if current_user.role != "admin" and doc_uploader_id != current_user.id:
+    if not (actor.is_admin or stored.uploader_id == actor.user_id):
         raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail="Nincs jogosultságod más felhasználó dokumentumának törlésére."
+                            status_code=status.HTTP_403_FORBIDDEN,
+                            detail="Nincs jogosultságod más felhasználó dokumentumának törlésére."
         )
 
-    # Törlés
-    deleted_chunks = kb.delete(request.doc_id)
+    index_id = stored.index_id or stored.id
+    deleted_chunks = kb.delete(index_id) if index_id else 0
+    files.delete(stored.id, actor=actor)
+
     return {
         "status": "success",
-        "doc_id": request.doc_id,
+        "file_id": stored.id,
+        "index_id": index_id,
         "deleted_chunks": deleted_chunks
     }
 
