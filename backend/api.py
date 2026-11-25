@@ -4,7 +4,7 @@ import json
 import shutil
 import tempfile
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from fastapi import FastAPI, UploadFile, File, Form, WebSocket, WebSocketDisconnect, HTTPException
 from pydantic import BaseModel
