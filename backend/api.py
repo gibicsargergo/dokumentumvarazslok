@@ -9,6 +9,7 @@ from typing import List, Optional
 from fastapi import FastAPI, UploadFile, File, Form, WebSocket, WebSocketDisconnect, HTTPException
 from pydantic import BaseModel
 
+from filestore import Actor, FileStore, StoredFile, UnsupportedFileType, can_delete
 from rag import KnowledgeBase
 from llm import stream_rag_response
 
@@ -18,6 +19,16 @@ app = FastAPI(
     version="1.0.0" )
 
 kb = KnowledgeBase()
+files = FileStore()
+
+# IDEIGLENES: minden kérés ezzel a beégetett admin felhasználóval fut.
+ACTOR = Actor(user_id="admin", role="admin")
+
+def file_response(stored: StoredFile) -> dict[str, Any]:
+    '''A tárolt fájl metaadatai a kliens számára (a szerveroldali útvonal nélkül).'''
+    data = stored.to_dict()
+    data.pop("path", None)
+    return data
 
 class SearchRequest(BaseModel):
     query: str
@@ -39,48 +50,67 @@ class SearchHitResponse(BaseModel):
     doc_id: str
 
 class DeleteRequest(BaseModel):
-    doc_id: str
+    file_id: str
 
 @app.post("/add")
-async def add_document(
+def add_document(
     file: UploadFile = File(...),
     title: Optional[str] = Form(None),
     category: Optional[str] = Form(None),
     tags: Optional[str] = Form(None), # Címkék vesszővel elválasztva(!)
+    is_private: bool = Form(False),
 ):
     '''
-        Új fájl feltöltése és feldolgozása.
-        A mentést, szövegkinyerést (OCR-rel), chunkolást és beágyazást a kb.add() végzi.
+        Új fájl feltöltése: az eredeti fájl és metaadatai a FileStore-ba kerülnek,
+        majd a kb.add() kinyeri a szöveget (OCR-rel), chunkol és beágyaz.
+        Ha az indexelés nem sikerül, a fájl ettől még tárolva marad.
     '''
-    tags_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else None
-
-    # Ideiglenes mentés
     if not file.filename:
         raise HTTPException(status_code=400, detail="A feltöltött fájlnak nincs neve.")
-    suffix = Path(file.filename).suffix
-    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-        shutil.copyfileobj(file.file, tmp)
-        tmp_path = tmp.name
+    tags_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else []
 
+    # 1) Eredeti fájl + metaadatok mentése
+    try:
+        stored = files.save(
+            file.file,
+            filename=file.filename,
+            uploader_id=ACTOR.user_id,
+            name=title,
+            category=category or "",
+            labels=tags_list,
+            is_private=is_private,
+        )
+    except UnsupportedFileType as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    # 2) Szövegkinyerés + indexelés
     try:
         result = kb.add(
-            path=tmp_path,
-            title=title or file.filename,
-            category=category,
-            tags=tags_list,
+            stored.path,
+            title=stored.name,
+            category=stored.category,
+            tags=list(stored.labels),
+            uploader_id=stored.uploader_id,
+            is_private=stored.is_private,
         )
-        return{
-            "status": "success",
-            "doc_id": result["id"],
-            "chunks_created": result["chunks"],
-            "filename": file.filename,
-        }
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Hiba a fájl feldolgozásakor: {str(e)}")
-    finally:
-        # Ideiglenes fájl eltakarítása
-        if os.path.exists(tmp_path):
-            os.remove(tmp_path)
+        return {
+            "status": "stored",
+            "indexed": False,
+            "error": f"Hiba a fájl feldolgozásakor: {str(e)}",
+            "chunks_created": 0,
+            "file": file_response(stored),
+        }
+
+    if result["chunks"]:
+        files.set_index_id(stored.id, result["id"])
+        stored = files.get(stored.id) or stored
+    return {
+        "status": "success",
+        "indexed": bool(result["chunks"]),
+        "chunks_created": result["chunks"],
+        "file": file_response(stored),
+    }
 
 @app.post("/search", response_model=List[SearchHitResponse])
 def search_chunks(request: SearchRequest):
@@ -88,7 +118,12 @@ def search_chunks(request: SearchRequest):
         Keresés a tudástárban koszinusz hasonlóság, BM25 és Fuzzy matching reranking alapján.
     '''
     try:
-        results = kb.search(query=request.query, k=request.k)
+        results = kb.search(
+            query=request.query,
+            k=request.k,
+            viewer_id=ACTOR.user_id,
+            see_all=ACTOR.is_admin,
+        )
         return results
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Keresési hiba: {str(e)}")
@@ -96,22 +131,27 @@ def search_chunks(request: SearchRequest):
 @app.delete("/delete")
 def delete_document(request: DeleteRequest):
     '''
-        Dokumentum és annak összes chunkjának törlése a vektoradatbázisból és a tárolóból.
+        Dokumentum törlése a tárolóból, és összes chunkjának törlése a vektoradatbázisból.
     '''
-    deleted_chunks = kb.delete(request.doc_id)
-    if deleted_chunks == 0:
-        raise HTTPException(status_code=404, detail=f"Nem található dokumentum a megadott azonosítóval: {request.doc_id}")
+    stored = files.get(request.file_id, viewer=ACTOR)
+    if stored is None:
+        raise HTTPException(status_code=404, detail=f"Nem található dokumentum a megadott azonosítóval: {request.file_id}")
+    if not can_delete(ACTOR, stored):
+        raise HTTPException(status_code=403, detail="Dokumentumot csak adminisztrátor törölhet.")
+
+    deleted_chunks = kb.delete(stored.index_id) if stored.index_id else 0
+    files.delete(stored.id, actor=ACTOR)
     return {
         "status": "success",
-        "doc_id": request.doc_id,
+        "file_id": stored.id,
         "deleted_chunks": deleted_chunks }
 
-@app.get("/documents") # TODO: csak azt listázza, amit a felhasználó láthat
+@app.get("/documents")
 def list_documents():
     '''
-        A tudástárban eltárolt összes dokumentum metaadatainak kilistázása.
+        A felhasználó számára látható dokumentumok metaadatai, legújabb elöl.
     '''
-    return kb.list_documents()
+    return [file_response(f) for f in files.list_files(viewer=ACTOR)]
 
 @app.websocket("/chat")
 async def websocket_chat(websocket: WebSocket):
@@ -135,7 +175,11 @@ async def websocket_chat(websocket: WebSocket):
 
             try:
                 # Releváns kontextus lekérése
-                hits = kb.search(query=user_query)
+                hits = kb.search(
+                    query=user_query,
+                    viewer_id=ACTOR.user_id,
+                    see_all=ACTOR.is_admin,
+                )
 
                 # Felhasznált források elküldése a kliensnek
                 sources_payload = {
