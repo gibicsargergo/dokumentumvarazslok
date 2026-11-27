@@ -1,8 +1,11 @@
 
 import { Link, NavLink, Outlet } from 'react-router-dom';
 import UserMenu from './UserMenu';
+import { useAuth } from '../auth/useAuth';
 
 export default function AuthenticatedLayout() {
+    const { isAdmin } = useAuth();
+
     return (
         <div className="flex min-h-screen flex-col">
             <header className="border-b border-line bg-surface">
@@ -36,6 +39,19 @@ export default function AuthenticatedLayout() {
                         >
                             Documents
                         </NavLink>
+
+                        {isAdmin && (
+                            <NavLink
+                                to="/admin/stats"
+                                className={({ isActive }) =>
+                                    isActive
+                                        ? 'text-sm font-semibold text-ink'
+                                        : 'text-sm text-subtle hover:text-ink'
+                                }
+                            >
+                                Stats
+                            </NavLink>
+                        )}
                     </nav>
 
                     <UserMenu />

@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import type { Document } from '../types/document';
 import {
   deleteDocument,
+  downloadUrl,
   listDocuments,
   updateDocument,
   uploadDocument,
@@ -10,6 +11,11 @@ import {
 } from '../lib/documents';
 import UploadDocumentModal from '../components/UploadDocumentModal';
 import EditDocumentModal from '../components/EditDocumentModal';
+
+function formatDate(iso: string): string {
+  const date = new Date(iso);
+  return Number.isNaN(date.getTime()) ? '—' : date.toLocaleString();
+}
 
 export default function DocumentsPage() {
   const [documents, setDocuments] = useState<Document[]>([]);
@@ -96,12 +102,14 @@ export default function DocumentsPage() {
         </div>
       ) : (
         <div className="overflow-x-auto rounded-xl border border-line bg-surface">
-          <table className="w-full min-w-[680px] text-left text-sm">
+          <table className="w-full min-w-[960px] text-left text-sm">
             <thead>
               <tr className="border-b border-line text-xs uppercase tracking-wide text-subtle">
                 <th className="px-4 py-3 font-medium">Name</th>
                 <th className="px-4 py-3 font-medium">Category</th>
                 <th className="px-4 py-3 font-medium">Labels</th>
+                <th className="px-4 py-3 font-medium">Uploaded</th>
+                <th className="px-4 py-3 font-medium">Uploader</th>
                 <th className="px-4 py-3 font-medium">Chunks</th>
                 <th className="px-4 py-3 text-right font-medium">Actions</th>
               </tr>
@@ -129,8 +137,21 @@ export default function DocumentsPage() {
                       )}
                     </div>
                   </td>
+                  <td className="whitespace-nowrap px-4 py-3 text-body">
+                    {formatDate(doc.uploadedAt)}
+                  </td>
+                  <td className="max-w-[200px] truncate px-4 py-3 text-body">
+                    {doc.uploaderEmail ?? '—'}
+                  </td>
                   <td className="px-4 py-3 text-body">{doc.chunks}</td>
-                  <td className="px-4 py-3 text-right">
+                  <td className="whitespace-nowrap px-4 py-3 text-right">
+                    <a
+                      href={downloadUrl(doc.id)}
+                      download={doc.filename}
+                      className="mr-2 inline-block rounded-lg border border-line px-3 py-1.5 text-xs font-medium text-subtle transition hover:text-emphasis"
+                    >
+                      Download
+                    </a>
                     <button
                       type="button"
                       onClick={() => setEditing(doc)}

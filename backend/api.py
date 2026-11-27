@@ -20,6 +20,7 @@ from fastapi import (
     Header,
     status
 )
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, EmailStr
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -398,7 +399,7 @@ def update_document(
         )
 
     if request.is_private is not None:
-        updated_chunks = kb.set_visibility(id, is_private=request.is_private)
+        updated_chunks = kb.set_visibility(index_id, is_private=request.is_private)
     
     return {
         "status": "success",
@@ -441,29 +442,61 @@ def delete_document(
         "deleted_chunks": deleted_chunks
     }
 
-@app.get("/documents")
-def list_documents(current_user: Optional[User] = Depends(get_optional_current_user)):
+class DocumentResponse(BaseModel):
+    id: str
+    title: str
+    category: str
+    tags: List[str]
+    chunks: int
+    filename: str
+    uploaded_at: str
+    uploader_id: str
+    uploader_email: Optional[str] = None
+    is_private: bool
+
+@app.get("/documents", response_model=List[DocumentResponse])
+def list_documents(current_user: User = Depends(get_current_user)):
     '''
-        Eltárolt dokumentumok kilistázása.
+        Eltárolt dokumentumok kilistázása a FileStore alapján (feltöltési dátummal és feltöltővel).
+        Felhasználó: publikus + saját dokumentumok; adminisztrátor: az összes.
+        Az indexelésben elbukott fájlok is szerepelnek (0 chunkkal).
     '''
-    all_docs = kb.list_documents()
+    actor = Actor(user_id=current_user.id, role=current_user.role)
+    chunk_counts = {d["id"]: d["chunks"] for d in kb.list_documents()}
+    emails: dict[str, Optional[str]] = {}
 
-    # Az admin felhasználó szűrés nélkül minden dokumentumot megkap
-    if current_user and current_user.role == "admin":
-        return all_docs
+    out: list[DocumentResponse] = []
+    for stored in files.list_files(viewer=actor):
+        if stored.uploader_id not in emails:
+            uploader = auth_store.get_user_by_id(stored.uploader_id)
+            emails[stored.uploader_id] = uploader.email if uploader else None
+        out.append(DocumentResponse(
+            id=stored.id,
+            title=stored.name,
+            category=stored.category,
+            tags=list(stored.labels),
+            chunks=chunk_counts.get(stored.index_id, 0) if stored.index_id else 0,
+            filename=stored.original_filename,
+            uploaded_at=stored.uploaded_at.isoformat(),
+            uploader_id=stored.uploader_id,
+            uploader_email=emails[stored.uploader_id],
+            is_private=stored.is_private,
+        ))
+    return out
 
-    # Az átlagos felhasználó csak a saját és a publikus dokumentumokat láthatja
-    filtered_docs = []
-    for doc in all_docs:
-        is_private = doc.get("is_private", False)
-        uploader_id = doc.get("uploader_id", "")
-
-        if not is_private:
-            filtered_docs.append(doc)
-        elif current_user and uploader_id == current_user.id:
-            filtered_docs.append(doc)
-
-    return filtered_docs
+@app.get("/documents/{id}/download")
+def download_document(id: str, current_user: User = Depends(get_current_user)):
+    '''
+        Az eredeti feltöltött fájl letöltése. Privát fájlt csak a feltöltő és az admin tölthet le.
+    '''
+    actor = Actor(user_id=current_user.id, role=current_user.role)
+    stored = files.get(id, viewer=actor) or files.get_by_index_id(id, viewer=actor)
+    if stored is None or not stored.path.is_file():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Nem található dokumentum a megadott azonosítóval: {id}"
+        )
+    return FileResponse(stored.path, filename=stored.original_filename)
 
 @app.get("/admin/stats", response_model=SearchStatsResponse)
 def search_stats(
@@ -503,9 +536,13 @@ async def websocket_chat(websocket: WebSocket):
 
     token = websocket.query_params.get("token") or websocket.cookies.get("session_token")
     user = auth_service.get_current_user(token) if token else None
+    if user is None:
+        await websocket.send_text(json.dumps({"type": "error", "message": "Bejelentkezés szükséges."}))
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
 
-    viewer_id = user.id if user else None
-    see_all = (user.role == "admin") if user else False
+    viewer_id = user.id
+    see_all = user.role == "admin"
 
     try:
         while True:
