@@ -55,24 +55,38 @@ export function splitLabels(input: string): string[] {
 
 // -- response mapping ────────────────────────────────────────────────────────
 
-// Shape of the merged backend's GET /documents (kb.list_documents).
-type KbDocument = {
+// Shape of the backend's GET /documents (DocumentResponse in backend/api.py).
+type ApiDocument = {
   id: string;
   title: string;
   category: string;
   tags: string[];
   chunks: number;
-  source: string;
+  filename: string;
+  uploaded_at: string;
+  uploader_id: string;
+  uploader_email: string | null;
+  is_private: boolean;
 };
 
-function mapKbDocument(doc: Partial<KbDocument>): Document {
+function mapApiDocument(doc: ApiDocument): Document {
   return {
-    id: doc.id ?? '',
-    name: doc.title ?? '',
-    category: doc.category ?? '',
-    labels: doc.tags ?? [],
-    chunks: doc.chunks ?? 0,
+    id: doc.id,
+    name: doc.title,
+    category: doc.category,
+    labels: doc.tags,
+    chunks: doc.chunks,
+    filename: doc.filename,
+    uploadedAt: doc.uploaded_at,
+    uploaderId: doc.uploader_id,
+    uploaderEmail: doc.uploader_email,
+    visibility: doc.is_private ? 'private' : 'public',
   };
+}
+
+// The session cookie authenticates the request, so a plain link works.
+export function downloadUrl(id: string): string {
+  return `/api/documents/${encodeURIComponent(id)}/download`;
 }
 
 type AddResponse = {
@@ -108,8 +122,8 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 // -- API ─────────────────────────────────────────────────────────────────────
 
 export async function listDocuments(): Promise<Document[]> {
-  const docs = await request<KbDocument[]>('/documents');
-  return docs.map(mapKbDocument);
+  const docs = await request<ApiDocument[]>('/documents');
+  return docs.map(mapApiDocument);
 }
 
 export async function uploadDocument(draft: UploadDraft): Promise<void> {

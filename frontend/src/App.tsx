@@ -4,6 +4,7 @@ import DocumentsPage from './pages/DocumentsPage'
 import LoginPage from './pages/LoginPage'
 import RegisterPage from './pages/RegisterPage'
 import ProtectedRoute from './auth/ProtectedRoute'
+import AdminRoute from './auth/AdminRoute'
 import AuthenticatedLayout from './components/AuthenticatedLayout';
 import SearchStatsPage from './pages/SearchStatsPage'
 
@@ -31,7 +32,9 @@ export default function App() {
               <Route path="/" element={<Home />} />
               <Route path="/search" element={<SearchPage />} />
               <Route path="/documents" element={<DocumentsPage />} />
-              <Route path="/admin/stats" element={<SearchStatsPage />} />
+              <Route element={<AdminRoute />}>
+                <Route path="/admin/stats" element={<SearchStatsPage />} />
+              </Route>
           </Route>
         </Route>
       </Routes>
